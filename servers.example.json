@@ -1,0 +1,20 @@
+[
+  {
+    "name": "Ragnarok",
+    "host": "ausy073.gamedata.io",
+    "port": 21,
+    "user": "ni123456_1",
+    "password": "CHANGE_ME",
+    "savePath": "/arksa/ShooterGame/Saved/SavedArks/Ragnarok_WP",
+    "saveFile": "Ragnarok_WP.ark"
+  },
+  {
+    "name": "The Island",
+    "host": "ausy073.gamedata.io",
+    "port": 21,
+    "user": "ni123456_1",
+    "password": "CHANGE_ME",
+    "savePath": "/arksa/ShooterGame/Saved/SavedArks/TheIsland_WP",
+    "saveFile": "TheIsland_WP.ark"
+  }
+]

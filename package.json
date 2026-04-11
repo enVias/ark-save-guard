@@ -1,0 +1,21 @@
+{
+  "name": "ark-save-guard",
+  "version": "1.0.0",
+  "description": "Discord bot that monitors ARK save files on Nitrado FTP servers for corruption",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "basic-ftp": "^5.0.5",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "@types/node": "^22.10.5"
+  }
+}

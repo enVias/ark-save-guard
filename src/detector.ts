@@ -1,0 +1,201 @@
+import { readFileSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { config } from './config'
+import { fetchAllSizes } from './ftp'
+
+export interface CorruptionAlert {
+  serverName: string
+  currentSize: number
+  peakSize: number
+  dropPercent: number
+}
+
+// If running on Railway with a volume mounted, save history there so it
+// survives redeploys. Otherwise just save it in the current folder.
+const HISTORY_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.cwd()
+const HISTORY_FILE = join(HISTORY_DIR, 'save-history.json')
+
+// Keeps track of each server's recent save file sizes so we can spot sudden drops.
+// Saved to disk so we don't lose it when the bot restarts.
+const sizeHistory = new Map<string, number[]>()
+
+// Remembers which servers we've already sent a corruption alert for,
+// so we don't spam the same warning over and over.
+const sentAlerts = new Set<string>()
+
+// Same idea but for FTP connection errors — only notify once per server
+// until it reconnects successfully.
+const sentFtpErrors = new Set<string>()
+
+// Loads previous size history from disk (if it exists) so we can pick
+// up right where we left off after a restart.
+export function loadHistory(): void {
+  try {
+    const raw = readFileSync(HISTORY_FILE, 'utf-8')
+    const data = JSON.parse(raw) as Record<string, number[]>
+    let loaded = 0
+    for (const [name, history] of Object.entries(data)) {
+      if (Array.isArray(history) && history.every(n => typeof n === 'number' && n > 0)) {
+        sizeHistory.set(name, history.slice(-(config.historyDepth + 1)))
+        loaded++
+      }
+    }
+    console.log(`Loaded size history for ${loaded} server(s) from ${HISTORY_FILE}`)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      console.log('No existing history file — starting fresh')
+    } else {
+      console.warn('Failed to load history file (starting fresh):', err)
+    }
+  }
+}
+
+// Writes current size history to disk so it survives restarts.
+function saveHistory(): void {
+  try {
+    const data: Record<string, number[]> = {}
+    for (const [name, history] of sizeHistory) {
+      data[name] = history
+    }
+    writeFileSync(HISTORY_FILE, JSON.stringify(data, null, 2))
+  } catch (err) {
+    console.error('Failed to save history:', err)
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+export { formatBytes }
+
+/*
+ * The main corruption check. Runs every cycle.
+ *
+ * How it works:
+ *   1. Grab the current .ark file size from each server's FTP
+ *   2. Compare it to the biggest size we've seen recently (the "peak")
+ *   3. If the file suddenly got way smaller (>30% drop), that's likely corruption
+ *
+ * We only record a new size when it actually changes — since Nitrado only
+ * saves about once an hour, most checks will see the exact same file size.
+ * This way our history tracks real save changes, not duplicate readings.
+ */
+export interface Recovery {
+  serverName: string
+  currentSize: number
+}
+
+export async function checkForCorruption(): Promise<{
+  alerts: CorruptionAlert[]
+  errors: string[]
+  recoveries: Recovery[]
+}> {
+  const results = await fetchAllSizes(config.servers)
+  const alerts: CorruptionAlert[] = []
+  const errors: string[] = []
+  const recoveries: Recovery[] = []
+
+  for (const result of results) {
+    // If we couldn't connect to this server's FTP, report it (but only once
+    // per outage — we don't want to flood Discord every 15 minutes).
+    if (result.error) {
+      if (!sentFtpErrors.has(result.server.name)) {
+        sentFtpErrors.add(result.server.name)
+        errors.push(result.error)
+      }
+      continue
+    }
+    if (result.size === null) continue
+
+    // FTP worked again — stop suppressing error messages for this server
+    sentFtpErrors.delete(result.server.name)
+
+    const { name } = result.server
+    const currentSize = result.size
+
+    // Only add to history if the size is different from last time.
+    // No point recording the same number over and over between hourly saves.
+    const history = sizeHistory.get(name) || []
+    if (history.length > 0 && history[history.length - 1] === currentSize) {
+      // Same size as last time — nothing new to record
+    } else {
+      history.push(currentSize)
+    }
+
+    // Keep history from growing forever
+    while (history.length > config.historyDepth + 1) {
+      history.shift()
+    }
+    sizeHistory.set(name, history)
+
+    // Need at least 2 different sizes before we can compare anything
+    if (history.length < 2) continue
+
+    // Look at all the sizes we've seen BEFORE the current one, and find
+    // the biggest. That's our "peak" — what the save file should roughly be.
+    const previousReadings = history.slice(0, -1)
+    const peakSize = Math.max(...previousReadings)
+
+    if (peakSize <= 0) continue
+
+    if (currentSize < peakSize) {
+      const dropPercent = ((peakSize - currentSize) / peakSize) * 100
+
+      if (dropPercent > config.dropThreshold * 100) {
+        // Big drop detected! But only send an alert if we haven't already.
+        // The caller (index.ts) will mark this as delivered after Discord
+        // actually receives it — that way if Discord is down, we retry.
+        if (!sentAlerts.has(name)) {
+          alerts.push({
+            serverName: name,
+            currentSize,
+            peakSize,
+            dropPercent: Math.round(dropPercent),
+          })
+        }
+      } else {
+        // Small drop, nothing to worry about — clear any old alert
+        if (sentAlerts.has(name)) {
+          recoveries.push({ serverName: name, currentSize })
+        }
+        clearAlertsForServer(name)
+      }
+    } else {
+      // Size is the same or bigger than before — all good
+      if (sentAlerts.has(name)) {
+        recoveries.push({ serverName: name, currentSize })
+      }
+      clearAlertsForServer(name)
+    }
+  }
+
+  saveHistory()
+  return { alerts, errors, recoveries }
+}
+
+// Called by index.ts after an alert is successfully sent to Discord.
+// Prevents the same alert from being sent again until the size recovers.
+export function markAlertDelivered(name: string) {
+  sentAlerts.add(name)
+}
+
+// Resets alert tracking for a server so it can alert again in the future
+// (called when the save file size goes back to normal).
+function clearAlertsForServer(name: string) {
+  sentAlerts.delete(name)
+}
+
+export function getStatus(): { server: string; historyLength: number; latestSize: string }[] {
+  return config.servers.map(s => {
+    const history = sizeHistory.get(s.name) || []
+    return {
+      server: s.name,
+      historyLength: history.length,
+      latestSize: history.length > 0 ? formatBytes(history[history.length - 1]) : 'no data',
+    }
+  })
+}
