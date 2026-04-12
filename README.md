@@ -37,6 +37,8 @@ For each map you want to monitor, you'll need these from your Nitrado dashboard:
 | Save folder path | Browse FTP to find it | `/arksa/ShooterGame/Saved/SavedArks/Ragnarok_WP` |
 | Save filename | The `.ark` file in that folder | `Ragnarok_WP.ark` |
 
+You'll also pick a **name** for each server — this is just a label that shows up in alerts (e.g. "Ragnarok", "The Island"). It doesn't need to match anything.
+
 **Tip:** If you're not sure about the save path or filename, connect to the FTP with [FileZilla](https://filezilla-project.org/) (free) and browse to the save folder to check.
 
 ---
@@ -56,6 +58,7 @@ You'll need **Node.js 18 or newer** — download the **prebuilt installer** from
    - **Windows:** If you can't see the file, open File Explorer > **View** > check **Hidden items**. If Windows won't let you rename it, open a Command Prompt in the folder and run `copy .env.example .env`
 2. Copy `servers.example.json` to `servers.json` and fill in your server details
    - This is where you add your Nitrado FTP info for each map — the example file shows the format
+   - Add more servers by copying a `{ }` block with a comma between each one (no comma after the last one)
    - Only have one server? Just delete the second `{ }` block and the comma before it
 
 ### A3. Install and run
@@ -109,7 +112,34 @@ Go to the **Variables** tab in your Railway service and add these one by one:
 
 - `DISCORD_BOT_TOKEN` — your bot token
 - `DISCORD_CHANNEL_ID` — your channel ID
-- `SERVERS` — your server list as JSON (copy the contents of `servers.example.json` and paste it in)
+- `SERVERS` — your server list as JSON (see below)
+
+For `SERVERS`, paste something like this into the value field:
+
+```json
+[
+  {
+    "name": "Ragnarok",
+    "host": "ausy073.gamedata.io",
+    "port": 21,
+    "user": "ni123456_1",
+    "password": "yourPassword",
+    "savePath": "/arksa/ShooterGame/Saved/SavedArks/Ragnarok_WP",
+    "saveFile": "Ragnarok_WP.ark"
+  },
+  {
+    "name": "The Island",
+    "host": "ausy073.gamedata.io",
+    "port": 21,
+    "user": "ni123456_1",
+    "password": "yourPassword",
+    "savePath": "/arksa/ShooterGame/Saved/SavedArks/TheIsland_WP",
+    "saveFile": "TheIsland_WP.ark"
+  }
+]
+```
+
+Each server is a `{ }` block separated by commas. Add as many as you need — just make sure there's a comma between each block, but **not** after the last one.
 
 Railway restarts the bot each time you add a variable, so you may see errors until all three are in. That's fine.
 
@@ -122,7 +152,7 @@ The bot needs persistent storage so its history survives redeploys:
 3. Select your bot's service when asked
 4. Set the mount path to `/data`
 
-Once that's done, click **Restart** on your service. The bot should come online in your Discord channel.
+Once everything is set up, click **Deploy** on your service. The bot should come online in your Discord channel.
 
 ---
 
