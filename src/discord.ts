@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, TextChannel, EmbedBuilder, ActivityType } from 'discord.js'
+import { Client, GatewayIntentBits, TextChannel, EmbedBuilder } from 'discord.js'
 import { config } from './config'
 import { CorruptionAlert, Recovery, formatBytes } from './detector'
 
@@ -9,10 +9,7 @@ let alertChannel: TextChannel
 export async function initDiscord(): Promise<void> {
   client = new Client({
     intents: [GatewayIntentBits.Guilds],
-    presence: {
-      status: 'online',
-      activities: [{ name: 'save files', type: ActivityType.Watching }],
-    },
+    presence: { status: 'online' },
   })
 
   // Set up the "ready" listener before logging in so we don't miss it
