@@ -1,6 +1,6 @@
 import { config } from './config'
 import { checkForCorruption, getStatus, loadHistory, markAlertDelivered } from './detector'
-import { initDiscord, sendCorruptionAlert, sendRecoveryNotice, sendErrorNotice, sendHeartbeat, sendStartupMessage, destroyDiscord } from './discord'
+import { initDiscord, sendCorruptionAlert, sendRecoveryNotice, sendHeartbeat, sendStartupMessage, destroyDiscord } from './discord'
 
 // Makes sure we don't start a new check while the previous one is still going
 // (e.g. if FTP servers are being really slow).
@@ -26,12 +26,9 @@ async function runCheck() {
       )
     }
 
-    // Let Discord know about any FTP connection problems
+    // Log FTP connection problems (console/Railway logs only, not Discord)
     if (errors.length > 0) {
       console.warn('FTP errors:', errors)
-      await sendErrorNotice(errors).catch(err =>
-        console.error('Failed to send error notice to Discord:', err)
-      )
     }
 
     // Send each corruption alert to Discord. We only mark it as "delivered"
