@@ -74,22 +74,6 @@ export async function sendRecoveryNotice(recovery: Recovery): Promise<void> {
   await alertChannel.send({ embeds: [embed] })
 }
 
-// Sends a yellow warning when one or more FTP connections failed.
-export async function sendErrorNotice(errors: string[]): Promise<void> {
-  const embed = new EmbedBuilder()
-    .setColor(0xFEE75C)
-    .setTitle('\u{26A0}\u{FE0F} FTP Connection Issues')
-    .setDescription(
-      `Having trouble reaching ${errors.length === 1 ? 'a server' : `${errors.length} servers`}:\n\n` +
-      errors.map(e => `\u{1F534} ${e}`).join('\n').slice(0, 4000) +
-      `\n\n*Will keep retrying — you'll only see this once per server until it reconnects.*`
-    )
-    .setFooter({ text: 'ARK Save Guard' })
-    .setTimestamp()
-
-  await alertChannel.send({ embeds: [embed] })
-}
-
 // Sends a green "I'm online" message when the bot starts up.
 export async function sendStartupMessage(): Promise<void> {
   const serverList = config.servers.map(s => s.name).join(', ') || 'none'
