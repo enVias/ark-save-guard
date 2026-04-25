@@ -1,10 +1,11 @@
 import { config } from './config'
 import { checkForCorruption, getStatus, loadHistory, markAlertDelivered } from './detector'
-import { initDiscord, sendCorruptionAlert, sendRecoveryNotice, sendErrorNotice, sendStartupMessage, destroyDiscord } from './discord'
+import { initDiscord, sendCorruptionAlert, sendRecoveryNotice, sendErrorNotice, sendHeartbeat, sendStartupMessage, destroyDiscord } from './discord'
 
 // Makes sure we don't start a new check while the previous one is still going
 // (e.g. if FTP servers are being really slow).
 let checking = false
+let checkCount = 0
 
 async function runCheck() {
   if (checking) {
@@ -49,6 +50,14 @@ async function runCheck() {
     if (alerts.length === 0 && errors.length === 0) {
       const status = getStatus()
       console.log('All OK.', status.map(s => `${s.server}: ${s.latestSize} (${s.historyLength} readings)`).join(', '))
+
+      // Every 4th check, post a heartbeat to Discord so people know it's alive
+      checkCount++
+      if (checkCount % 4 === 0) {
+        await sendHeartbeat(status).catch(err =>
+          console.error('Failed to send heartbeat to Discord:', err)
+        )
+      }
     }
   } catch (err) {
     console.error('Check cycle failed:', err)

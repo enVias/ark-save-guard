@@ -107,6 +107,20 @@ export async function sendStartupMessage(): Promise<void> {
   await alertChannel.send({ embeds: [embed] })
 }
 
+// Periodic "all clear" so people know the bot is still running.
+export async function sendHeartbeat(status: { server: string; latestSize: string }[]): Promise<void> {
+  const summary = status.map(s => `${s.server}: \`${s.latestSize}\``).join('\n')
+
+  const embed = new EmbedBuilder()
+    .setColor(0x2B2D31)
+    .setTitle('\u{1F49A} All Clear')
+    .setDescription(summary)
+    .setFooter({ text: 'ARK Save Guard' })
+    .setTimestamp()
+
+  await alertChannel.send({ embeds: [embed] })
+}
+
 export function destroyDiscord(): void {
   client?.destroy()
 }
