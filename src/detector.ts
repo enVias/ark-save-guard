@@ -89,14 +89,19 @@ export interface Recovery {
   currentSize: number
 }
 
+export interface FtpError {
+  serverName: string
+  reason: string
+}
+
 export async function checkForCorruption(): Promise<{
   alerts: CorruptionAlert[]
-  errors: string[]
+  errors: FtpError[]
   recoveries: Recovery[]
 }> {
   const results = await fetchAllSizes(config.servers)
   const alerts: CorruptionAlert[] = []
-  const errors: string[] = []
+  const errors: FtpError[] = []
   const recoveries: Recovery[] = []
 
   for (const result of results) {
@@ -105,7 +110,7 @@ export async function checkForCorruption(): Promise<{
     if (result.error) {
       if (!sentFtpErrors.has(result.server.name)) {
         sentFtpErrors.add(result.server.name)
-        errors.push(result.error)
+        errors.push({ serverName: result.server.name, reason: result.error })
       }
       continue
     }
@@ -181,6 +186,12 @@ export async function checkForCorruption(): Promise<{
 // Prevents the same alert from being sent again until the size recovers.
 export function markAlertDelivered(name: string) {
   sentAlerts.add(name)
+}
+
+// Returns true if any server is currently in an FTP error state.
+// Used by the heartbeat so it only fires when everything really is healthy.
+export function hasActiveFtpErrors(): boolean {
+  return sentFtpErrors.size > 0
 }
 
 // Resets alert tracking for a server so it can alert again in the future

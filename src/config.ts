@@ -25,6 +25,7 @@ export const config = {
   discord: {
     token: requireEnv('DISCORD_BOT_TOKEN'),
     channelId: requireEnv('DISCORD_CHANNEL_ID'),
+    alertRoleId: process.env.ALERT_ROLE_ID || '',
   },
   checkIntervalMs: (parseInt(process.env.CHECK_INTERVAL_MINUTES || '15') || 15) * 60 * 1000,
   dropThreshold: (parseInt(process.env.DROP_THRESHOLD_PERCENT || '30') || 30) / 100,

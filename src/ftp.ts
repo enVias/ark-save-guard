@@ -8,7 +8,27 @@ export interface FtpSizeResult {
 }
 
 // Connects to a single server's FTP and grabs the save file's size in bytes.
+// If the size comes back as 0 (which happens sometimes mid-save), waits a
+// few seconds and tries one more time before giving up.
 export async function fetchSaveSize(server: ServerEntry): Promise<FtpSizeResult> {
+  const result = await fetchSaveSizeOnce(server)
+
+  // 0 bytes is almost certainly a glitch (e.g. save mid-write) — retry once
+  if (result.size === 0) {
+    console.log(`${server.name}: got 0 bytes, retrying in 5s...`)
+    await new Promise(r => setTimeout(r, 5_000))
+    const retry = await fetchSaveSizeOnce(server)
+    if (retry.size === 0) {
+      console.log(`${server.name}: still 0 bytes after retry, skipping this check`)
+      return { server, size: null } // skip — don't record 0 in history
+    }
+    return retry
+  }
+
+  return result
+}
+
+async function fetchSaveSizeOnce(server: ServerEntry): Promise<FtpSizeResult> {
   const client = new Client(15_000) // give up after 15 seconds if the server isn't responding
   try {
     await client.access({

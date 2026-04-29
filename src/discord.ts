@@ -47,6 +47,8 @@ export async function initDiscord(): Promise<void> {
 
 // Sends a big red warning to Discord when a save file looks corrupted.
 export async function sendCorruptionAlert(alert: CorruptionAlert): Promise<void> {
+  const ping = config.discord.alertRoleId ? `<@&${config.discord.alertRoleId}>` : '@here'
+
   const embed = new EmbedBuilder()
     .setColor(0xED4245)
     .setTitle('\u{1F6A8} Save Corruption Detected')
@@ -57,7 +59,25 @@ export async function sendCorruptionAlert(alert: CorruptionAlert): Promise<void>
     .setFooter({ text: 'ARK Save Guard' })
     .setTimestamp()
 
-  await alertChannel.send({ content: '@here', embeds: [embed] })
+  await alertChannel.send({ content: ping, embeds: [embed] })
+}
+
+// Sends a public-friendly notice when one or more servers can't be reached.
+export async function sendErrorNotice(serverNames: string[]): Promise<void> {
+  const list = serverNames.map(n => `\u{2022} **${n}**`).join('\n')
+
+  const embed = new EmbedBuilder()
+    .setColor(0xFEE75C)
+    .setTitle('\u{26A0}\u{FE0F} Connection Issues')
+    .setDescription(
+      `Having trouble checking ${serverNames.length === 1 ? 'a server' : 'some servers'}:\n\n` +
+      list +
+      `\n\nThis is usually temporary. Will keep trying.`
+    )
+    .setFooter({ text: 'ARK Save Guard' })
+    .setTimestamp()
+
+  await alertChannel.send({ embeds: [embed] })
 }
 
 // Sends a green message when a server's save file is back to normal after a corruption alert.
@@ -91,13 +111,13 @@ export async function sendStartupMessage(): Promise<void> {
   await alertChannel.send({ embeds: [embed] })
 }
 
-// Periodic "all clear" so people know the bot is still running.
+// Periodic status update so people know the bot is still running.
 export async function sendHeartbeat(status: { server: string; latestSize: string }[]): Promise<void> {
-  const summary = status.map(s => `${s.server}: \`${s.latestSize}\``).join('\n')
+  const summary = status.map(s => `\u{2705} ${s.server}: \`${s.latestSize}\``).join('\n')
 
   const embed = new EmbedBuilder()
     .setColor(0x2B2D31)
-    .setTitle('\u{1F49A} All Clear')
+    .setTitle('\u{1F996} Routine Check \u{2014} All Saves Healthy')
     .setDescription(summary)
     .setFooter({ text: 'ARK Save Guard' })
     .setTimestamp()

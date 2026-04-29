@@ -163,6 +163,7 @@ Once everything is set up, click **Deploy** on your service. The bot should come
 | `DISCORD_BOT_TOKEN` | Yes | — | Your Discord bot's token |
 | `DISCORD_CHANNEL_ID` | Yes | — | The channel where alerts get posted |
 | `SERVERS` | Railway only | — | Your server list as JSON (local users use `servers.json` instead) |
+| `ALERT_ROLE_ID` | No | — | Discord role to ping on corruption alerts (uses `@here` if not set) |
 | `CHECK_INTERVAL_MINUTES` | No | `15` | How often to check (in minutes) |
 | `DROP_THRESHOLD_PERCENT` | No | `30` | How big of a drop triggers an alert (30 = 30%) |
 | `HISTORY_DEPTH` | No | `10` | How many past save sizes to remember |

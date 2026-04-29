@@ -1,6 +1,6 @@
 import { config } from './config'
-import { checkForCorruption, getStatus, loadHistory, markAlertDelivered } from './detector'
-import { initDiscord, sendCorruptionAlert, sendRecoveryNotice, sendHeartbeat, sendStartupMessage, destroyDiscord } from './discord'
+import { checkForCorruption, getStatus, hasActiveFtpErrors, loadHistory, markAlertDelivered } from './detector'
+import { initDiscord, sendCorruptionAlert, sendRecoveryNotice, sendErrorNotice, sendHeartbeat, sendStartupMessage, destroyDiscord } from './discord'
 
 // Makes sure we don't start a new check while the previous one is still going
 // (e.g. if FTP servers are being really slow).
@@ -26,9 +26,12 @@ async function runCheck() {
       )
     }
 
-    // Log FTP connection problems (console/Railway logs only, not Discord)
+    // Let Discord know about connection problems (just server names, no technical details)
     if (errors.length > 0) {
-      console.warn('FTP errors:', errors)
+      console.warn('FTP errors:', errors.map(e => `${e.serverName}: ${e.reason}`).join('; '))
+      await sendErrorNotice(errors.map(e => e.serverName)).catch(err =>
+        console.error('Failed to send error notice to Discord:', err)
+      )
     }
 
     // Send each corruption alert to Discord. We only mark it as "delivered"
@@ -44,7 +47,7 @@ async function runCheck() {
       }
     }
 
-    if (alerts.length === 0 && errors.length === 0) {
+    if (alerts.length === 0 && errors.length === 0 && !hasActiveFtpErrors()) {
       const status = getStatus()
       console.log('All OK.', status.map(s => `${s.server}: ${s.latestSize} (${s.historyLength} readings)`).join(', '))
 
