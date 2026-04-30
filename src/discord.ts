@@ -51,7 +51,7 @@ export async function sendCorruptionAlert(alert: CorruptionAlert): Promise<void>
 
   const embed = new EmbedBuilder()
     .setColor(0xED4245)
-    .setTitle('\u{1F6A8} Save Corruption Detected')
+    .setTitle('\u{1F6A8} Possible Save Corruption')
     .setDescription(
       `**${alert.serverName}** dropped **${alert.dropPercent}%** \u{2014} ` +
       `\`${formatBytes(alert.peakSize)}\` \u{2192} \`${formatBytes(alert.currentSize)}\``
@@ -84,9 +84,9 @@ export async function sendErrorNotice(serverNames: string[]): Promise<void> {
 export async function sendRecoveryNotice(recovery: Recovery): Promise<void> {
   const embed = new EmbedBuilder()
     .setColor(0x57F287)
-    .setTitle('\u{2705} Save Restored')
+    .setTitle('\u{2705} Save Size Recovered')
     .setDescription(
-      `**${recovery.serverName}** is back to normal \u{2014} \`${formatBytes(recovery.currentSize)}\``
+      `**${recovery.serverName}** is back within the expected size range \u{2014} \`${formatBytes(recovery.currentSize)}\``
     )
     .setFooter({ text: 'ARK Save Guard' })
     .setTimestamp()
@@ -102,7 +102,7 @@ export async function sendStartupMessage(): Promise<void> {
     .setColor(0x57F287)
     .setTitle('\u{2705} Save Guard Online')
     .setDescription(
-      `\u{1F996} Watching **${config.servers.length}** server${config.servers.length === 1 ? '' : 's'} every **${config.checkIntervalMs / 60000}** min.\n` +
+      `\u{1F996} Watching **${config.servers.length}** server${config.servers.length === 1 ? '' : 's'}.\n` +
       serverList
     )
     .setFooter({ text: 'ARK Save Guard' })
@@ -117,7 +117,7 @@ export async function sendHeartbeat(status: { server: string; latestSize: string
 
   const embed = new EmbedBuilder()
     .setColor(0x2B2D31)
-    .setTitle('\u{1F996} Routine Check \u{2014} All Saves Healthy')
+    .setTitle('\u{1F996} Routine Check \u{2014} No Size Issues Detected')
     .setDescription(summary)
     .setFooter({ text: 'ARK Save Guard' })
     .setTimestamp()
