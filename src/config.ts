@@ -21,15 +21,31 @@ function requireEnv(key: string): string {
   return val
 }
 
+function readIntSetting(key: string, defaultValue: number, min: number, max = Number.MAX_SAFE_INTEGER): number {
+  const raw = process.env[key]
+  if (!raw) return defaultValue
+
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < min || value > max) {
+    console.warn(`Invalid ${key}="${raw}" — using ${defaultValue}`)
+    return defaultValue
+  }
+
+  return value
+}
+
+const MAX_CHECK_INTERVAL_MINUTES = 1440
+const MAX_HISTORY_DEPTH = 1000
+
 export const config = {
   discord: {
     token: requireEnv('DISCORD_BOT_TOKEN'),
     channelId: requireEnv('DISCORD_CHANNEL_ID'),
     alertRoleId: process.env.ALERT_ROLE_ID || '',
   },
-  checkIntervalMs: (parseInt(process.env.CHECK_INTERVAL_MINUTES || '15') || 15) * 60 * 1000,
-  dropThreshold: (parseInt(process.env.DROP_THRESHOLD_PERCENT || '30') || 30) / 100,
-  historyDepth: parseInt(process.env.HISTORY_DEPTH || '10') || 10,
+  checkIntervalMs: readIntSetting('CHECK_INTERVAL_MINUTES', 15, 1, MAX_CHECK_INTERVAL_MINUTES) * 60 * 1000,
+  dropThreshold: readIntSetting('DROP_THRESHOLD_PERCENT', 30, 1, 99) / 100,
+  historyDepth: readIntSetting('HISTORY_DEPTH', 10, 1, MAX_HISTORY_DEPTH),
   servers: parseServers(),
 }
 

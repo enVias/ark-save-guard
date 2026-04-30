@@ -41,7 +41,7 @@ async function runCheck() {
       console.warn(`ALERT: ${alert.serverName} dropped ${alert.dropPercent}% (${alert.currentSize} -> peak was ${alert.peakSize})`)
       try {
         await sendCorruptionAlert(alert)
-        markAlertDelivered(alert.serverName)
+        markAlertDelivered(alert.serverName, alert.peakSize)
       } catch (err) {
         console.error(`Failed to send alert for ${alert.serverName} to Discord (will retry next cycle):`, err)
       }

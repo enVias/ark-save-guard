@@ -10,6 +10,11 @@ export interface CorruptionAlert {
   dropPercent: number
 }
 
+interface SavedState {
+  sizeHistory: Record<string, number[]>
+  activeAlertPeaks: Record<string, number>
+}
+
 // If running on Railway with a volume mounted, save history there so it
 // survives redeploys. Otherwise just save it in the current folder.
 const HISTORY_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.cwd()
@@ -19,28 +24,47 @@ const HISTORY_FILE = join(HISTORY_DIR, 'save-history.json')
 // Saved to disk so we don't lose it when the bot restarts.
 const sizeHistory = new Map<string, number[]>()
 
-// Remembers which servers we've already sent a corruption alert for,
-// so we don't spam the same warning over and over.
-const sentAlerts = new Set<string>()
+// Remembers the peak size that triggered each active corruption alert,
+// so we don't spam and recovery is measured against the original healthy size.
+const sentAlertPeaks = new Map<string, number>()
 
 // Same idea but for FTP connection errors — only notify once per server
 // until it reconnects successfully.
 const sentFtpErrors = new Set<string>()
+
+function isHistoryRecord(value: unknown): value is Record<string, number[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return Object.values(value).every(history =>
+    Array.isArray(history) && history.every(n => typeof n === 'number' && n > 0)
+  )
+}
 
 // Loads previous size history from disk (if it exists) so we can pick
 // up right where we left off after a restart.
 export function loadHistory(): void {
   try {
     const raw = readFileSync(HISTORY_FILE, 'utf-8')
-    const data = JSON.parse(raw) as Record<string, number[]>
+    const data = JSON.parse(raw) as Partial<SavedState> | Record<string, number[]>
+    const loadedState = isHistoryRecord(data) ? { sizeHistory: data, activeAlertPeaks: {} } : data
+    const configuredServerNames = new Set(config.servers.map(s => s.name))
     let loaded = 0
-    for (const [name, history] of Object.entries(data)) {
+    for (const [name, history] of Object.entries(loadedState.sizeHistory || {})) {
       if (Array.isArray(history) && history.every(n => typeof n === 'number' && n > 0)) {
         sizeHistory.set(name, history.slice(-(config.historyDepth + 1)))
         loaded++
       }
     }
+    let loadedAlerts = 0
+    for (const [name, peakSize] of Object.entries(loadedState.activeAlertPeaks || {})) {
+      if (configuredServerNames.has(name) && typeof peakSize === 'number' && peakSize > 0) {
+        sentAlertPeaks.set(name, peakSize)
+        loadedAlerts++
+      }
+    }
     console.log(`Loaded size history for ${loaded} server(s) from ${HISTORY_FILE}`)
+    if (loadedAlerts > 0) {
+      console.log(`Loaded ${loadedAlerts} active alert(s) from ${HISTORY_FILE}`)
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       console.log('No existing history file — starting fresh')
@@ -53,9 +77,15 @@ export function loadHistory(): void {
 // Writes current size history to disk so it survives restarts.
 function saveHistory(): void {
   try {
-    const data: Record<string, number[]> = {}
+    const data: SavedState = {
+      sizeHistory: {},
+      activeAlertPeaks: {},
+    }
     for (const [name, history] of sizeHistory) {
-      data[name] = history
+      data.sizeHistory[name] = history
+    }
+    for (const [name, peakSize] of sentAlertPeaks) {
+      data.activeAlertPeaks[name] = peakSize
     }
     writeFileSync(HISTORY_FILE, JSON.stringify(data, null, 2))
   } catch (err) {
@@ -137,6 +167,16 @@ export async function checkForCorruption(): Promise<{
     }
     sizeHistory.set(name, history)
 
+    const activeAlertPeak = sentAlertPeaks.get(name)
+    if (activeAlertPeak !== undefined) {
+      const dropPercent = ((activeAlertPeak - currentSize) / activeAlertPeak) * 100
+      if (currentSize >= activeAlertPeak || dropPercent <= config.dropThreshold * 100) {
+        recoveries.push({ serverName: name, currentSize })
+        clearAlertsForServer(name)
+      }
+      continue
+    }
+
     // Need at least 2 different sizes before we can compare anything
     if (history.length < 2) continue
 
@@ -154,26 +194,18 @@ export async function checkForCorruption(): Promise<{
         // Big drop detected! But only send an alert if we haven't already.
         // The caller (index.ts) will mark this as delivered after Discord
         // actually receives it — that way if Discord is down, we retry.
-        if (!sentAlerts.has(name)) {
-          alerts.push({
-            serverName: name,
-            currentSize,
-            peakSize,
-            dropPercent: Math.round(dropPercent),
-          })
-        }
+        alerts.push({
+          serverName: name,
+          currentSize,
+          peakSize,
+          dropPercent: Math.round(dropPercent),
+        })
       } else {
-        // Small drop, nothing to worry about — clear any old alert
-        if (sentAlerts.has(name)) {
-          recoveries.push({ serverName: name, currentSize })
-        }
+        // Small drop, nothing to worry about
         clearAlertsForServer(name)
       }
     } else {
       // Size is the same or bigger than before — all good
-      if (sentAlerts.has(name)) {
-        recoveries.push({ serverName: name, currentSize })
-      }
       clearAlertsForServer(name)
     }
   }
@@ -184,8 +216,9 @@ export async function checkForCorruption(): Promise<{
 
 // Called by index.ts after an alert is successfully sent to Discord.
 // Prevents the same alert from being sent again until the size recovers.
-export function markAlertDelivered(name: string) {
-  sentAlerts.add(name)
+export function markAlertDelivered(name: string, peakSize: number) {
+  sentAlertPeaks.set(name, peakSize)
+  saveHistory()
 }
 
 // Returns true if any server is currently in an FTP error state.
@@ -198,13 +231,13 @@ export function hasActiveFtpErrors(): boolean {
 // (alert was sent and the save hasn't recovered yet). Used by the heartbeat
 // so we don't claim everything is healthy while a save is still corrupt.
 export function hasActiveAlerts(): boolean {
-  return sentAlerts.size > 0
+  return sentAlertPeaks.size > 0
 }
 
 // Resets alert tracking for a server so it can alert again in the future
 // (called when the save file size goes back to normal).
 function clearAlertsForServer(name: string) {
-  sentAlerts.delete(name)
+  sentAlertPeaks.delete(name)
 }
 
 export function getStatus(): { server: string; historyLength: number; latestSize: string }[] {
