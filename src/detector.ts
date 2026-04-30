@@ -194,6 +194,13 @@ export function hasActiveFtpErrors(): boolean {
   return sentFtpErrors.size > 0
 }
 
+// Returns true if any server is currently in a corruption alert state
+// (alert was sent and the save hasn't recovered yet). Used by the heartbeat
+// so we don't claim everything is healthy while a save is still corrupt.
+export function hasActiveAlerts(): boolean {
+  return sentAlerts.size > 0
+}
+
 // Resets alert tracking for a server so it can alert again in the future
 // (called when the save file size goes back to normal).
 function clearAlertsForServer(name: string) {
