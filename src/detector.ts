@@ -33,8 +33,9 @@ const sentAlertPeaks = new Map<string, number>()
 const sentFtpErrors = new Set<string>()
 
 // Large ARK saves can appear smaller over FTP while Nitrado is still writing
-// them. Confirm any alert-sized drop after a short wait before notifying.
-const DROP_CONFIRMATION_DELAY_MS = 120_000
+// them. Confirm any alert-sized drop with several short-spaced reads before notifying.
+const CONFIRMATION_SAMPLE_COUNT = 3
+const CONFIRMATION_SAMPLE_INTERVAL_MS = 30_000
 const IN_PROGRESS_GROWTH_TOLERANCE = 0.02
 
 function isHistoryRecord(value: unknown): value is Record<string, number[]> {
@@ -192,9 +193,9 @@ function pushFtpErrorOnce(server: ServerEntry, reason: string, errors: FtpError[
   }
 }
 
-function isStillBeingWritten(firstSize: number, confirmedSize: number, peakSize: number): boolean {
-  if (confirmedSize <= firstSize) return false
-  return (confirmedSize - firstSize) / peakSize > IN_PROGRESS_GROWTH_TOLERANCE
+function hasMaterialSizeMovement(sizes: number[], peakSize: number): boolean {
+  if (sizes.length < 2) return false
+  return (Math.max(...sizes) - Math.min(...sizes)) / peakSize > IN_PROGRESS_GROWTH_TOLERANCE
 }
 
 async function confirmAlertCandidates(
@@ -205,53 +206,83 @@ async function confirmAlertCandidates(
   if (candidates.length === 0) return
 
   console.warn(
-    `Confirming ${candidates.length} possible save size drop(s) in ${DROP_CONFIRMATION_DELAY_MS / 1000}s before alerting...`
+    `Confirming ${candidates.length} possible save size drop(s) with ` +
+    `${CONFIRMATION_SAMPLE_COUNT} sample(s) every ${CONFIRMATION_SAMPLE_INTERVAL_MS / 1000}s before alerting...`
   )
-  await sleep(DROP_CONFIRMATION_DELAY_MS)
 
-  const confirmationResults = await Promise.all(candidates.map(candidate => fetchSaveSize(candidate.server)))
+  const pending = new Map(candidates.map(candidate => [candidate.server.name, candidate]))
+  const latestSizes = new Map(candidates.map(candidate => [candidate.server.name, candidate.currentSize]))
+  const latestAssessments = new Map<string, SizeAssessment>()
+  const sampledSizes = new Map(candidates.map(candidate => [candidate.server.name, [candidate.currentSize]]))
 
-  for (let i = 0; i < candidates.length; i++) {
-    const candidate = candidates[i]
-    const result = confirmationResults[i]
-    const { name } = candidate.server
+  for (let sample = 1; sample <= CONFIRMATION_SAMPLE_COUNT && pending.size > 0; sample++) {
+    await sleep(CONFIRMATION_SAMPLE_INTERVAL_MS)
 
-    if (result.error) {
-      pushFtpErrorOnce(candidate.server, result.error, errors)
-      continue
-    }
-    if (result.size === null) continue
+    const sampleCandidates = Array.from(pending.values())
+    const confirmationResults = await Promise.all(sampleCandidates.map(candidate => fetchSaveSize(candidate.server)))
 
-    sentFtpErrors.delete(name)
+    for (let i = 0; i < sampleCandidates.length; i++) {
+      const candidate = sampleCandidates[i]
+      const result = confirmationResults[i]
+      const { name } = candidate.server
 
-    const confirmedSize = result.size
-    const assessment = assessSize(getHistory(name), confirmedSize)
-
-    if (assessment?.isAlertSizedDrop) {
-      if (isStillBeingWritten(candidate.currentSize, confirmedSize, assessment.peakSize)) {
-        console.log(
-          `${name}: possible drop is still changing; deferring alert ` +
-          `(${formatBytes(candidate.currentSize)} -> ${formatBytes(confirmedSize)})`
-        )
+      if (result.error) {
+        pushFtpErrorOnce(candidate.server, result.error, errors)
+        pending.delete(name)
+        continue
+      }
+      if (result.size === null) {
+        console.log(`${name}: confirmation sample returned no usable size; deferring alert`)
+        pending.delete(name)
         continue
       }
 
-      recordSize(name, confirmedSize)
-      alerts.push({
-        serverName: name,
-        currentSize: confirmedSize,
-        peakSize: assessment.peakSize,
-        dropPercent: Math.round(assessment.dropPercent),
-      })
+      sentFtpErrors.delete(name)
+
+      const confirmedSize = result.size
+      const assessment = assessSize(getHistory(name), confirmedSize)
+
+      if (!assessment?.isAlertSizedDrop) {
+        recordSize(name, confirmedSize)
+        console.log(
+          `${name}: ignored transient drop ` +
+          `(${formatBytes(candidate.peakSize)} -> ${formatBytes(candidate.currentSize)}; ` +
+          `sample ${sample} confirmed ${formatBytes(confirmedSize)})`
+        )
+        pending.delete(name)
+        latestSizes.delete(name)
+        latestAssessments.delete(name)
+        continue
+      }
+
+      latestSizes.set(name, confirmedSize)
+      latestAssessments.set(name, assessment)
+      sampledSizes.get(name)?.push(confirmedSize)
+    }
+  }
+
+  for (const candidate of pending.values()) {
+    const { name } = candidate.server
+    const latestSize = latestSizes.get(name)
+    const assessment = latestAssessments.get(name)
+    const samples = sampledSizes.get(name) || []
+    if (latestSize === undefined || !assessment) continue
+
+    if (hasMaterialSizeMovement(samples, assessment.peakSize)) {
+      console.log(
+        `${name}: possible drop is still changing; deferring alert ` +
+        `(${samples.map(formatBytes).join(' -> ')})`
+      )
       continue
     }
 
-    recordSize(name, confirmedSize)
-    console.log(
-      `${name}: ignored transient drop ` +
-      `(${formatBytes(candidate.peakSize)} -> ${formatBytes(candidate.currentSize)}; ` +
-      `confirmed ${formatBytes(confirmedSize)})`
-    )
+    recordSize(name, latestSize)
+    alerts.push({
+      serverName: name,
+      currentSize: latestSize,
+      peakSize: assessment.peakSize,
+      dropPercent: Math.round(assessment.dropPercent),
+    })
   }
 }
 
