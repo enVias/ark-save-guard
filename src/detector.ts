@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { config } from './config'
-import { fetchAllSizes } from './ftp'
+import { ServerEntry, config } from './config'
+import { fetchAllSizes, fetchSaveSize } from './ftp'
 
 export interface CorruptionAlert {
   serverName: string
@@ -31,6 +31,11 @@ const sentAlertPeaks = new Map<string, number>()
 // Same idea but for FTP connection errors — only notify once per server
 // until it reconnects successfully.
 const sentFtpErrors = new Set<string>()
+
+// Large ARK saves can appear smaller over FTP while Nitrado is still writing
+// them. Confirm any alert-sized drop after a short wait before notifying.
+const DROP_CONFIRMATION_DELAY_MS = 120_000
+const IN_PROGRESS_GROWTH_TOLERANCE = 0.02
 
 function isHistoryRecord(value: unknown): value is Record<string, number[]> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
@@ -108,7 +113,8 @@ export { formatBytes }
  * How it works:
  *   1. Grab the current .ark file size from each server's FTP
  *   2. Compare it to the biggest size we've seen recently (the "peak")
- *   3. If the file suddenly got way smaller (>30% drop), that's likely corruption
+ *   3. If the file suddenly got way smaller (>30% drop), confirm it with
+ *      another FTP read before alerting
  *
  * We only record a new size when it actually changes — since Nitrado only
  * saves about once an hour, most checks will see the exact same file size.
@@ -124,6 +130,131 @@ export interface FtpError {
   reason: string
 }
 
+interface SizeAssessment {
+  peakSize: number
+  dropPercent: number
+  isAlertSizedDrop: boolean
+}
+
+interface AlertCandidate {
+  server: ServerEntry
+  currentSize: number
+  peakSize: number
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function getHistory(name: string): number[] {
+  return sizeHistory.get(name) || []
+}
+
+function recordSize(name: string, size: number): void {
+  const history = getHistory(name)
+  if (history.length === 0 || history[history.length - 1] !== size) {
+    history.push(size)
+  }
+
+  while (history.length > config.historyDepth + 1) {
+    history.shift()
+  }
+
+  sizeHistory.set(name, history)
+}
+
+function assessSize(history: number[], currentSize: number): SizeAssessment | null {
+  const previousReadings =
+    history.length > 0 && history[history.length - 1] === currentSize
+      ? history.slice(0, -1)
+      : history
+
+  if (previousReadings.length === 0) return null
+
+  const peakSize = Math.max(...previousReadings)
+  if (peakSize <= 0) return null
+
+  const dropPercent = currentSize < peakSize
+    ? ((peakSize - currentSize) / peakSize) * 100
+    : 0
+
+  return {
+    peakSize,
+    dropPercent,
+    isAlertSizedDrop: dropPercent > config.dropThreshold * 100,
+  }
+}
+
+function pushFtpErrorOnce(server: ServerEntry, reason: string, errors: FtpError[]): void {
+  if (!sentFtpErrors.has(server.name)) {
+    sentFtpErrors.add(server.name)
+    errors.push({ serverName: server.name, reason })
+  }
+}
+
+function isStillBeingWritten(firstSize: number, confirmedSize: number, peakSize: number): boolean {
+  if (confirmedSize <= firstSize) return false
+  return (confirmedSize - firstSize) / peakSize > IN_PROGRESS_GROWTH_TOLERANCE
+}
+
+async function confirmAlertCandidates(
+  candidates: AlertCandidate[],
+  alerts: CorruptionAlert[],
+  errors: FtpError[],
+): Promise<void> {
+  if (candidates.length === 0) return
+
+  console.warn(
+    `Confirming ${candidates.length} possible save size drop(s) in ${DROP_CONFIRMATION_DELAY_MS / 1000}s before alerting...`
+  )
+  await sleep(DROP_CONFIRMATION_DELAY_MS)
+
+  const confirmationResults = await Promise.all(candidates.map(candidate => fetchSaveSize(candidate.server)))
+
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i]
+    const result = confirmationResults[i]
+    const { name } = candidate.server
+
+    if (result.error) {
+      pushFtpErrorOnce(candidate.server, result.error, errors)
+      continue
+    }
+    if (result.size === null) continue
+
+    sentFtpErrors.delete(name)
+
+    const confirmedSize = result.size
+    const assessment = assessSize(getHistory(name), confirmedSize)
+
+    if (assessment?.isAlertSizedDrop) {
+      if (isStillBeingWritten(candidate.currentSize, confirmedSize, assessment.peakSize)) {
+        console.log(
+          `${name}: possible drop is still changing; deferring alert ` +
+          `(${formatBytes(candidate.currentSize)} -> ${formatBytes(confirmedSize)})`
+        )
+        continue
+      }
+
+      recordSize(name, confirmedSize)
+      alerts.push({
+        serverName: name,
+        currentSize: confirmedSize,
+        peakSize: assessment.peakSize,
+        dropPercent: Math.round(assessment.dropPercent),
+      })
+      continue
+    }
+
+    recordSize(name, confirmedSize)
+    console.log(
+      `${name}: ignored transient drop ` +
+      `(${formatBytes(candidate.peakSize)} -> ${formatBytes(candidate.currentSize)}; ` +
+      `confirmed ${formatBytes(confirmedSize)})`
+    )
+  }
+}
+
 export async function checkForCorruption(): Promise<{
   alerts: CorruptionAlert[]
   errors: FtpError[]
@@ -133,15 +264,13 @@ export async function checkForCorruption(): Promise<{
   const alerts: CorruptionAlert[] = []
   const errors: FtpError[] = []
   const recoveries: Recovery[] = []
+  const candidates: AlertCandidate[] = []
 
   for (const result of results) {
     // If we couldn't connect to this server's FTP, report it (but only once
     // per outage — we don't want to flood Discord every 15 minutes).
     if (result.error) {
-      if (!sentFtpErrors.has(result.server.name)) {
-        sentFtpErrors.add(result.server.name)
-        errors.push({ serverName: result.server.name, reason: result.error })
-      }
+      pushFtpErrorOnce(result.server, result.error, errors)
       continue
     }
     if (result.size === null) continue
@@ -151,24 +280,10 @@ export async function checkForCorruption(): Promise<{
 
     const { name } = result.server
     const currentSize = result.size
-
-    // Only add to history if the size is different from last time.
-    // No point recording the same number over and over between hourly saves.
-    const history = sizeHistory.get(name) || []
-    if (history.length > 0 && history[history.length - 1] === currentSize) {
-      // Same size as last time — nothing new to record
-    } else {
-      history.push(currentSize)
-    }
-
-    // Keep history from growing forever
-    while (history.length > config.historyDepth + 1) {
-      history.shift()
-    }
-    sizeHistory.set(name, history)
-
     const activeAlertPeak = sentAlertPeaks.get(name)
+
     if (activeAlertPeak !== undefined) {
+      recordSize(name, currentSize)
       const dropPercent = ((activeAlertPeak - currentSize) / activeAlertPeak) * 100
       if (currentSize >= activeAlertPeak || dropPercent <= config.dropThreshold * 100) {
         recoveries.push({ serverName: name, currentSize })
@@ -177,38 +292,21 @@ export async function checkForCorruption(): Promise<{
       continue
     }
 
-    // Need at least 2 different sizes before we can compare anything
-    if (history.length < 2) continue
+    const assessment = assessSize(getHistory(name), currentSize)
 
-    // Look at all the sizes we've seen BEFORE the current one, and find
-    // the biggest. That's our "peak" — what the save file should roughly be.
-    const previousReadings = history.slice(0, -1)
-    const peakSize = Math.max(...previousReadings)
-
-    if (peakSize <= 0) continue
-
-    if (currentSize < peakSize) {
-      const dropPercent = ((peakSize - currentSize) / peakSize) * 100
-
-      if (dropPercent > config.dropThreshold * 100) {
-        // Big drop detected! But only send an alert if we haven't already.
-        // The caller (index.ts) will mark this as delivered after Discord
-        // actually receives it — that way if Discord is down, we retry.
-        alerts.push({
-          serverName: name,
-          currentSize,
-          peakSize,
-          dropPercent: Math.round(dropPercent),
-        })
-      } else {
-        // Small drop, nothing to worry about
-        clearAlertsForServer(name)
-      }
-    } else {
-      // Size is the same or bigger than before — all good
-      clearAlertsForServer(name)
+    if (assessment?.isAlertSizedDrop) {
+      candidates.push({
+        server: result.server,
+        currentSize,
+        peakSize: assessment.peakSize,
+      })
+      continue
     }
+
+    recordSize(name, currentSize)
   }
+
+  await confirmAlertCandidates(candidates, alerts, errors)
 
   saveHistory()
   return { alerts, errors, recoveries }
