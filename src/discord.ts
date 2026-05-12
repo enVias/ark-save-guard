@@ -148,23 +148,6 @@ export async function sendRecoveryNotice(recovery: Recovery): Promise<void> {
   await alertChannel.send({ embeds: [embed] })
 }
 
-// Sends a green "I'm online" message when the bot starts up.
-export async function sendStartupMessage(): Promise<void> {
-  const serverList = config.servers.map(s => s.name).join(', ') || 'none'
-
-  const embed = new EmbedBuilder()
-    .setColor(0x57F287)
-    .setTitle('\u{2705} Save Guard Online')
-    .setDescription(
-      `\u{1F996} Watching **${config.servers.length}** server${config.servers.length === 1 ? '' : 's'}.\n` +
-      serverList
-    )
-    .setFooter({ text: 'ARK Save Guard' })
-    .setTimestamp()
-
-  await alertChannel.send({ embeds: [embed] })
-}
-
 // Periodic status update so people know the bot is still running.
 // Edits one persistent status message instead of posting a new one each time.
 export async function sendHeartbeat(status: ServerStatus[], options: { recreate?: boolean } = {}): Promise<void> {

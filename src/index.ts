@@ -11,7 +11,7 @@ import {
   ServerStatus,
   formatBytes,
 } from './detector'
-import { initDiscord, sendCorruptionAlert, sendRecoveryNotice, sendErrorNotice, sendHeartbeat, sendStartupMessage, destroyDiscord } from './discord'
+import { initDiscord, sendCorruptionAlert, sendRecoveryNotice, sendErrorNotice, sendHeartbeat, destroyDiscord } from './discord'
 
 // Makes sure we don't start a new check while the previous one is still going
 // (e.g. if FTP servers are being really slow).
@@ -130,7 +130,6 @@ async function main() {
   loadHistory()
 
   await initDiscord()
-  await sendStartupMessage()
 
   // Check right away, then keep checking on a timer
   await runCheck()

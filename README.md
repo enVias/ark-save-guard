@@ -73,7 +73,7 @@ npm start
 
 > **Windows tip:** Open the folder in File Explorer, click the address bar, type `cmd`, and press Enter to open a terminal there.
 
-You should see the bot come online in your Discord channel with a green "Save Guard Online" message.
+You should see the bot create or update a "Save File Status" message in your Discord channel after its first check finishes.
 
 ### Keeping it running in the background
 
@@ -152,7 +152,7 @@ The bot needs persistent storage so its history survives redeploys:
 3. Select your bot's service when asked
 4. Set the mount path to `/data`
 
-Once everything is set up, click **Deploy** on your service. The bot should come online in your Discord channel.
+Once everything is set up, click **Deploy** on your service. The bot should create or update a "Save File Status" message in your Discord channel after its first check finishes.
 
 ---
 
