@@ -28,8 +28,11 @@ const sizeHistory = new Map<string, number[]>()
 // so we don't spam and recovery is measured against the original healthy size.
 const sentAlertPeaks = new Map<string, number>()
 
-// Same idea but for FTP connection errors — only notify once per server
-// until it reconnects successfully.
+// Tracks servers currently failing FTP checks so the dashboard stays accurate.
+const activeFtpErrors = new Set<string>()
+
+// Tracks which active FTP errors have already been announced in Discord.
+// If sending the notice fails, the server is left out of this set and retried.
 const sentFtpErrors = new Set<string>()
 
 // Large ARK saves can appear smaller over FTP while Nitrado is still writing
@@ -115,7 +118,7 @@ export { formatBytes }
  *   1. Grab the current .ark file size from each server's FTP
  *   2. Compare it to the biggest size we've seen recently (the "peak")
  *   3. If the file suddenly got way smaller (>30% drop), confirm it with
- *      another FTP read before alerting
+ *      several spaced FTP reads before alerting
  *
  * We only record a new size when it actually changes — since Nitrado only
  * saves about once an hour, most checks will see the exact same file size.
@@ -129,6 +132,14 @@ export interface Recovery {
 export interface FtpError {
   serverName: string
   reason: string
+}
+
+export interface ServerStatus {
+  server: string
+  historyLength: number
+  latestSize: string
+  state: 'ok' | 'alert' | 'ftpError'
+  detail?: string
 }
 
 interface SizeAssessment {
@@ -186,11 +197,16 @@ function assessSize(history: number[], currentSize: number): SizeAssessment | nu
   }
 }
 
-function pushFtpErrorOnce(server: ServerEntry, reason: string, errors: FtpError[]): void {
+function queueFtpErrorNotice(server: ServerEntry, reason: string, errors: FtpError[]): void {
+  activeFtpErrors.add(server.name)
   if (!sentFtpErrors.has(server.name)) {
-    sentFtpErrors.add(server.name)
     errors.push({ serverName: server.name, reason })
   }
+}
+
+function clearFtpError(name: string): void {
+  activeFtpErrors.delete(name)
+  sentFtpErrors.delete(name)
 }
 
 function hasMaterialSizeMovement(sizes: number[], peakSize: number): boolean {
@@ -227,7 +243,7 @@ async function confirmAlertCandidates(
       const { name } = candidate.server
 
       if (result.error) {
-        pushFtpErrorOnce(candidate.server, result.error, errors)
+        queueFtpErrorNotice(candidate.server, result.error, errors)
         pending.delete(name)
         continue
       }
@@ -237,7 +253,7 @@ async function confirmAlertCandidates(
         continue
       }
 
-      sentFtpErrors.delete(name)
+      clearFtpError(name)
 
       const confirmedSize = result.size
       const assessment = assessSize(getHistory(name), confirmedSize)
@@ -298,16 +314,16 @@ export async function checkForCorruption(): Promise<{
   const candidates: AlertCandidate[] = []
 
   for (const result of results) {
-    // If we couldn't connect to this server's FTP, report it (but only once
-    // per outage — we don't want to flood Discord every 15 minutes).
+    // If we couldn't connect to this server's FTP, queue a notice. Once a
+    // notice is delivered, further notices are suppressed until FTP recovers.
     if (result.error) {
-      pushFtpErrorOnce(result.server, result.error, errors)
+      queueFtpErrorNotice(result.server, result.error, errors)
       continue
     }
     if (result.size === null) continue
 
-    // FTP worked again — stop suppressing error messages for this server
-    sentFtpErrors.delete(result.server.name)
+    // FTP worked again, so future outages should be announced normally.
+    clearFtpError(result.server.name)
 
     const { name } = result.server
     const currentSize = result.size
@@ -318,7 +334,6 @@ export async function checkForCorruption(): Promise<{
       const dropPercent = ((activeAlertPeak - currentSize) / activeAlertPeak) * 100
       if (currentSize >= activeAlertPeak || dropPercent <= config.dropThreshold * 100) {
         recoveries.push({ serverName: name, currentSize })
-        clearAlertsForServer(name)
       }
       continue
     }
@@ -350,17 +365,21 @@ export function markAlertDelivered(name: string, peakSize: number) {
   saveHistory()
 }
 
-// Returns true if any server is currently in an FTP error state.
-// Used by the heartbeat so it only fires when everything really is healthy.
-export function hasActiveFtpErrors(): boolean {
-  return sentFtpErrors.size > 0
+// Called after a recovery notice reaches Discord. If sending fails, the active
+// alert remains in place and the recovery notice will be retried next cycle.
+export function markRecoveryDelivered(name: string) {
+  clearAlertsForServer(name)
+  saveHistory()
 }
 
-// Returns true if any server is currently in a corruption alert state
-// (alert was sent and the save hasn't recovered yet). Used by the heartbeat
-// so we don't claim everything is healthy while a save is still corrupt.
-export function hasActiveAlerts(): boolean {
-  return sentAlertPeaks.size > 0
+// Called after an FTP error notice reaches Discord. If sending fails, the
+// current outage stays pending and the notice will be retried next cycle.
+export function markFtpErrorsDelivered(serverNames: string[]) {
+  for (const name of serverNames) {
+    if (activeFtpErrors.has(name)) {
+      sentFtpErrors.add(name)
+    }
+  }
 }
 
 // Resets alert tracking for a server so it can alert again in the future
@@ -369,13 +388,43 @@ function clearAlertsForServer(name: string) {
   sentAlertPeaks.delete(name)
 }
 
-export function getStatus(): { server: string; historyLength: number; latestSize: string }[] {
+export function getStatus(): ServerStatus[] {
   return config.servers.map(s => {
     const history = sizeHistory.get(s.name) || []
+    const latestSize = history.length > 0 ? history[history.length - 1] : null
+    const activeAlertPeak = sentAlertPeaks.get(s.name)
+    const hasFtpError = activeFtpErrors.has(s.name)
+
+    if (activeAlertPeak !== undefined) {
+      const dropPercent = latestSize !== null && latestSize < activeAlertPeak
+        ? Math.round(((activeAlertPeak - latestSize) / activeAlertPeak) * 100)
+        : 0
+      const alertDetail = `down ${dropPercent}% from ${formatBytes(activeAlertPeak)}`
+
+      return {
+        server: s.name,
+        historyLength: history.length,
+        latestSize: latestSize !== null ? formatBytes(latestSize) : 'no data',
+        state: 'alert',
+        detail: hasFtpError ? `${alertDetail}; connection issue` : alertDetail,
+      }
+    }
+
+    if (hasFtpError) {
+      return {
+        server: s.name,
+        historyLength: history.length,
+        latestSize: latestSize !== null ? formatBytes(latestSize) : 'no data',
+        state: 'ftpError',
+        detail: 'connection issue',
+      }
+    }
+
     return {
       server: s.name,
       historyLength: history.length,
-      latestSize: history.length > 0 ? formatBytes(history[history.length - 1]) : 'no data',
+      latestSize: latestSize !== null ? formatBytes(latestSize) : 'no data',
+      state: 'ok',
     }
   })
 }

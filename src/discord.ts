@@ -1,9 +1,63 @@
+import { readFileSync, writeFileSync } from 'fs'
+import { join } from 'path'
 import { Client, GatewayIntentBits, TextChannel, EmbedBuilder } from 'discord.js'
 import { config } from './config'
-import { CorruptionAlert, Recovery, formatBytes } from './detector'
+import { CorruptionAlert, Recovery, ServerStatus, formatBytes } from './detector'
 
 let client: Client
 let alertChannel: TextChannel
+let statusMessageId: string | null = null
+
+interface StatusMessageState {
+  channelId: string
+  messageId: string
+}
+
+// Keep the status message stable across Railway restarts.
+const STATUS_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.cwd()
+const STATUS_MESSAGE_FILE = join(STATUS_DIR, 'status-message.json')
+
+function loadStatusMessageId(): string | null {
+  if (statusMessageId) return statusMessageId
+
+  try {
+    const data = JSON.parse(readFileSync(STATUS_MESSAGE_FILE, 'utf-8')) as Partial<StatusMessageState>
+    if (data.channelId === config.discord.channelId && typeof data.messageId === 'string') {
+      statusMessageId = data.messageId
+      return statusMessageId
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn('Failed to load status message state:', err)
+    }
+  }
+
+  return null
+}
+
+function saveStatusMessageId(messageId: string): void {
+  statusMessageId = messageId
+
+  try {
+    const data: StatusMessageState = {
+      channelId: config.discord.channelId,
+      messageId,
+    }
+    writeFileSync(STATUS_MESSAGE_FILE, JSON.stringify(data, null, 2))
+  } catch (err) {
+    console.error('Failed to save status message state:', err)
+  }
+}
+
+function formatStatusLine(status: ServerStatus): string {
+  if (status.state === 'alert') {
+    return `\u{1F6A8} ${status.server}: \`${status.latestSize}\` (${status.detail || 'possible corruption'})`
+  }
+  if (status.state === 'ftpError') {
+    return `\u{26A0}\u{FE0F} ${status.server}: \`${status.latestSize}\` (${status.detail || 'connection issue'})`
+  }
+  return `\u{2705} ${status.server}: \`${status.latestSize}\``
+}
 
 // Connects the bot to Discord and finds the alert channel.
 export async function initDiscord(): Promise<void> {
@@ -112,17 +166,40 @@ export async function sendStartupMessage(): Promise<void> {
 }
 
 // Periodic status update so people know the bot is still running.
-export async function sendHeartbeat(status: { server: string; latestSize: string }[]): Promise<void> {
-  const summary = status.map(s => `\u{2705} ${s.server}: \`${s.latestSize}\``).join('\n')
+// Edits one persistent status message instead of posting a new one each time.
+export async function sendHeartbeat(status: ServerStatus[], options: { recreate?: boolean } = {}): Promise<void> {
+  const summary = status.map(formatStatusLine).join('\n')
+  const hasIssues = status.some(s => s.state !== 'ok')
+  const updatedAt = Math.floor(Date.now() / 1000)
 
   const embed = new EmbedBuilder()
-    .setColor(0x2B2D31)
-    .setTitle('\u{1F996} Routine Check \u{2014} No Size Issues Detected')
-    .setDescription(summary)
+    .setColor(hasIssues ? 0xFEE75C : 0x2B2D31)
+    .setTitle('\u{1F996} Save File Status')
+    .setDescription(`${summary}\n\n\u{1F551} Updated: <t:${updatedAt}:R>`)
     .setFooter({ text: 'ARK Save Guard' })
     .setTimestamp()
 
-  await alertChannel.send({ embeds: [embed] })
+  const existingMessageId = loadStatusMessageId()
+  if (options.recreate && existingMessageId) {
+    try {
+      await alertChannel.messages.delete(existingMessageId)
+    } catch (err) {
+      console.warn('Failed to delete old status message before recreating it:', err)
+    }
+  }
+
+  if (existingMessageId && !options.recreate) {
+    try {
+      const message = await alertChannel.messages.edit(existingMessageId, { embeds: [embed] })
+      saveStatusMessageId(message.id)
+      return
+    } catch (err) {
+      console.warn('Failed to edit status message; creating a new one:', err)
+    }
+  }
+
+  const message = await alertChannel.send({ embeds: [embed] })
+  saveStatusMessageId(message.id)
 }
 
 export function destroyDiscord(): void {

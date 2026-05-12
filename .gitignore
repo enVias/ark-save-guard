@@ -3,3 +3,4 @@ dist/
 .env
 servers.json
 save-history.json
+status-message.json
