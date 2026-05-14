@@ -4,3 +4,4 @@ dist/
 servers.json
 save-history.json
 status-message.json
+event-messages.json

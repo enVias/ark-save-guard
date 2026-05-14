@@ -13,6 +13,7 @@ export interface CorruptionAlert {
 interface SavedState {
   sizeHistory: Record<string, number[]>
   activeAlertPeaks: Record<string, number>
+  activeFtpErrors: string[]
 }
 
 // If running on Railway with a volume mounted, save history there so it
@@ -30,10 +31,6 @@ const sentAlertPeaks = new Map<string, number>()
 
 // Tracks servers currently failing FTP checks so the dashboard stays accurate.
 const activeFtpErrors = new Set<string>()
-
-// Tracks which active FTP errors have already been announced in Discord.
-// If sending the notice fails, the server is left out of this set and retried.
-const sentFtpErrors = new Set<string>()
 
 // Large ARK saves can appear smaller over FTP while Nitrado is still writing
 // them. Confirm any alert-sized drop with several short-spaced reads before notifying.
@@ -54,7 +51,9 @@ export function loadHistory(): void {
   try {
     const raw = readFileSync(HISTORY_FILE, 'utf-8')
     const data = JSON.parse(raw) as Partial<SavedState> | Record<string, number[]>
-    const loadedState = isHistoryRecord(data) ? { sizeHistory: data, activeAlertPeaks: {} } : data
+    const loadedState = isHistoryRecord(data)
+      ? { sizeHistory: data, activeAlertPeaks: {}, activeFtpErrors: [] }
+      : data
     const configuredServerNames = new Set(config.servers.map(s => s.name))
     let loaded = 0
     for (const [name, history] of Object.entries(loadedState.sizeHistory || {})) {
@@ -70,9 +69,19 @@ export function loadHistory(): void {
         loadedAlerts++
       }
     }
+    let loadedFtpErrors = 0
+    for (const name of loadedState.activeFtpErrors || []) {
+      if (configuredServerNames.has(name)) {
+        activeFtpErrors.add(name)
+        loadedFtpErrors++
+      }
+    }
     console.log(`Loaded size history for ${loaded} server(s) from ${HISTORY_FILE}`)
     if (loadedAlerts > 0) {
       console.log(`Loaded ${loadedAlerts} active alert(s) from ${HISTORY_FILE}`)
+    }
+    if (loadedFtpErrors > 0) {
+      console.log(`Loaded ${loadedFtpErrors} active FTP error(s) from ${HISTORY_FILE}`)
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -89,6 +98,7 @@ function saveHistory(): void {
     const data: SavedState = {
       sizeHistory: {},
       activeAlertPeaks: {},
+      activeFtpErrors: [...activeFtpErrors],
     }
     for (const [name, history] of sizeHistory) {
       data.sizeHistory[name] = history
@@ -139,6 +149,7 @@ export interface ServerStatus {
   historyLength: number
   latestSize: string
   state: 'ok' | 'alert' | 'ftpError'
+  hasFtpError?: boolean
   detail?: string
 }
 
@@ -199,14 +210,11 @@ function assessSize(history: number[], currentSize: number): SizeAssessment | nu
 
 function queueFtpErrorNotice(server: ServerEntry, reason: string, errors: FtpError[]): void {
   activeFtpErrors.add(server.name)
-  if (!sentFtpErrors.has(server.name)) {
-    errors.push({ serverName: server.name, reason })
-  }
+  errors.push({ serverName: server.name, reason })
 }
 
 function clearFtpError(name: string): void {
   activeFtpErrors.delete(name)
-  sentFtpErrors.delete(name)
 }
 
 function hasMaterialSizeMovement(sizes: number[], peakSize: number): boolean {
@@ -314,8 +322,8 @@ export async function checkForCorruption(): Promise<{
   const candidates: AlertCandidate[] = []
 
   for (const result of results) {
-    // If we couldn't connect to this server's FTP, queue a notice. Once a
-    // notice is delivered, further notices are suppressed until FTP recovers.
+    // If we couldn't connect to this server's FTP, keep it in the active
+    // issue set so Discord can edit one temporary incident message.
     if (result.error) {
       queueFtpErrorNotice(result.server, result.error, errors)
       continue
@@ -365,21 +373,12 @@ export function markAlertDelivered(name: string, peakSize: number) {
   saveHistory()
 }
 
-// Called after a recovery notice reaches Discord. If sending fails, the active
-// alert remains in place and the recovery notice will be retried next cycle.
+// Called once a save has recovered. Incident message cleanup is handled
+// separately so stale Discord messages can be retried without keeping the
+// detector in an alert state.
 export function markRecoveryDelivered(name: string) {
   clearAlertsForServer(name)
   saveHistory()
-}
-
-// Called after an FTP error notice reaches Discord. If sending fails, the
-// current outage stays pending and the notice will be retried next cycle.
-export function markFtpErrorsDelivered(serverNames: string[]) {
-  for (const name of serverNames) {
-    if (activeFtpErrors.has(name)) {
-      sentFtpErrors.add(name)
-    }
-  }
 }
 
 // Resets alert tracking for a server so it can alert again in the future
@@ -406,6 +405,7 @@ export function getStatus(): ServerStatus[] {
         historyLength: history.length,
         latestSize: latestSize !== null ? formatBytes(latestSize) : 'no data',
         state: 'alert',
+        hasFtpError,
         detail: hasFtpError ? `${alertDetail}; connection issue` : alertDetail,
       }
     }
@@ -416,6 +416,7 @@ export function getStatus(): ServerStatus[] {
         historyLength: history.length,
         latestSize: latestSize !== null ? formatBytes(latestSize) : 'no data',
         state: 'ftpError',
+        hasFtpError: true,
         detail: 'connection issue',
       }
     }

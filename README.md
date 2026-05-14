@@ -4,9 +4,9 @@ A Discord bot that watches your ARK server save files for corruption and alerts 
 
 ## What it does
 
-Every 15 minutes, the bot connects to your Nitrado server(s) via FTP and checks the size of each `.ark` save file. ARK saves generally grow over time, so if one suddenly gets much smaller (more than 30% by default), that usually means corruption. Before sending a Discord alert, the bot checks the file several more times over the next 90 seconds so it does not alert on a temporary partial size while Nitrado is still writing the save. The bot resets once the file goes back to normal.
+Every 15 minutes, the bot connects to your Nitrado server(s) via FTP and checks the size of each `.ark` save file. ARK saves generally grow over time, so if one suddenly gets much smaller (more than 30% by default), that usually means corruption. Before sending a Discord alert, the bot checks the file several more times over the next 90 seconds so it does not alert on a temporary partial size while Nitrado is still writing the save. The bot keeps one "Save File Status" message updated, posts temporary incident messages while problems are active, and deletes those incident messages once everything is back to normal.
 
-Size history is saved to disk, so the bot picks up where it left off if it restarts.
+Size history and Discord message tracking are saved to disk, so the bot picks up where it left off if it restarts.
 
 ## Before you start
 

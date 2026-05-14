@@ -6,19 +6,23 @@ import {
   getStatus,
   loadHistory,
   markAlertDelivered,
-  markFtpErrorsDelivered,
   markRecoveryDelivered,
   ServerStatus,
   formatBytes,
 } from './detector'
-import { initDiscord, sendCorruptionAlert, sendRecoveryNotice, sendErrorNotice, sendHeartbeat, destroyDiscord } from './discord'
+import {
+  initDiscord,
+  sendCorruptionAlert,
+  sendActiveCorruptionNotice,
+  sendErrorNotice,
+  sendHeartbeat,
+  deleteResolvedEventMessages,
+  destroyDiscord,
+} from './discord'
 
 // Makes sure we don't start a new check while the previous one is still going
 // (e.g. if FTP servers are being really slow).
 let checking = false
-// Startup and event messages should leave the dashboard at the bottom of the
-// channel. Keep retrying that recreation until the status update succeeds.
-let statusRecreatePending = true
 
 function applyCurrentEventsToStatus(status: ServerStatus[], alerts: CorruptionAlert[], recoveries: Recovery[]): ServerStatus[] {
   const alertsByServer = new Map(alerts.map(alert => [alert.serverName, alert]))
@@ -41,6 +45,7 @@ function applyCurrentEventsToStatus(status: ServerStatus[], alerts: CorruptionAl
         ...serverStatus,
         latestSize: formatBytes(recovery.currentSize),
         state: 'ok',
+        hasFtpError: undefined,
         detail: undefined,
       }
     }
@@ -59,29 +64,11 @@ async function runCheck() {
     console.log(`[${new Date().toISOString()}] Checking save files...`)
 
     const { alerts, errors, recoveries } = await checkForCorruption()
-    // Let Discord know when a server's save is back to normal
+    // Once a save is back to normal, clear the active alert state. The old
+    // incident message is deleted by the cleanup pass below.
     for (const recovery of recoveries) {
       console.log(`RECOVERED: ${recovery.serverName} is back to normal (${recovery.currentSize} bytes)`)
-      try {
-        await sendRecoveryNotice(recovery)
-        markRecoveryDelivered(recovery.serverName)
-        statusRecreatePending = true
-      } catch (err) {
-        console.error('Failed to send recovery notice to Discord:', err)
-      }
-    }
-
-    // Let Discord know about connection problems (just server names, no technical details)
-    if (errors.length > 0) {
-      const errorServerNames = errors.map(e => e.serverName)
-      console.warn('FTP errors:', errors.map(e => `${e.serverName}: ${e.reason}`).join('; '))
-      try {
-        await sendErrorNotice(errorServerNames)
-        markFtpErrorsDelivered(errorServerNames)
-        statusRecreatePending = true
-      } catch (err) {
-        console.error('Failed to send error notice to Discord:', err)
-      }
+      markRecoveryDelivered(recovery.serverName)
     }
 
     // Send each corruption alert to Discord. We only mark it as "delivered"
@@ -92,25 +79,60 @@ async function runCheck() {
       try {
         await sendCorruptionAlert(alert)
         markAlertDelivered(alert.serverName, alert.peakSize)
-        statusRecreatePending = true
       } catch (err) {
         console.error(`Failed to send alert for ${alert.serverName} to Discord (will retry next cycle):`, err)
       }
     }
 
     const status = applyCurrentEventsToStatus(getStatus(), alerts, recoveries)
+    const newAlertServerNames = new Set(alerts.map(alert => alert.serverName))
+    for (const serverStatus of status) {
+      if (serverStatus.state !== 'alert' || newAlertServerNames.has(serverStatus.server)) continue
+
+      try {
+        await sendActiveCorruptionNotice(serverStatus)
+      } catch (err) {
+        console.error(`Failed to update active corruption notice for ${serverStatus.server}:`, err)
+      }
+    }
+
+    const ftpErrorServerNames = status.filter(s => s.hasFtpError).map(s => s.server)
+
+    // Keep one active FTP incident message current while connection issues exist.
+    if (ftpErrorServerNames.length > 0) {
+      const ftpErrorDetails = errors.length > 0
+        ? errors.map(e => `${e.serverName}: ${e.reason}`).join('; ')
+        : ftpErrorServerNames.join(', ')
+      console.warn('FTP errors:', ftpErrorDetails)
+      try {
+        await sendErrorNotice(ftpErrorServerNames)
+      } catch (err) {
+        console.error('Failed to update FTP error notice in Discord:', err)
+      }
+    }
+
     const allOk = status.every(s => s.state === 'ok')
     console.log(
       `${allOk ? 'All OK' : 'Current status'}.`,
       status.map(s => `${s.server}: ${s.latestSize} (${s.historyLength} readings${s.detail ? `, ${s.detail}` : ''})`).join(', ')
     )
 
-    // Routine checks edit the dashboard. Event checks and startup recreate it underneath newer messages.
+    // Routine checks edit the dashboard in place. Only delete resolved
+    // incident messages after the dashboard reflects the current state.
+    let statusUpdated = false
     try {
-      await sendHeartbeat(status, { recreate: statusRecreatePending })
-      statusRecreatePending = false
+      await sendHeartbeat(status)
+      statusUpdated = true
     } catch (err) {
       console.error('Failed to update save file status in Discord:', err)
+    }
+
+    if (statusUpdated) {
+      try {
+        await deleteResolvedEventMessages(status)
+      } catch (err) {
+        console.error('Failed to clean up resolved Discord event messages:', err)
+      }
     }
   } catch (err) {
     console.error('Check cycle failed:', err)
